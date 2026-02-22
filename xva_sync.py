@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-xva_sync.py — XCP-ng XAPI Plugin: Remote XVA Template Sync
+xva_sync.py -- XCP-ng XAPI Plugin: Remote XVA Template Sync
 
 Syncs VM templates from a read-only SMB share to a local SR.
 Designed to run on uncluttered XCP-ng hosts managed by an external orchestrator.
@@ -39,7 +39,7 @@ import traceback
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
-# XenAPIPlugin shim — allows syntax/logic testing outside XCP-ng
+# XenAPIPlugin shim -- allows syntax/logic testing outside XCP-ng
 # ---------------------------------------------------------------------------
 try:
     import XenAPIPlugin
@@ -78,9 +78,13 @@ DEFAULT_SMB_VER = "3.0"
 # Logging
 # ---------------------------------------------------------------------------
 
+_logging_initialized = False
+
 def _setup_logging():
-    if logging.getLogger().handlers:
+    global _logging_initialized
+    if _logging_initialized:
         return
+    _logging_initialized = True
     fmt = "%(asctime)s [%(levelname)s] %(message)s"
     logging.basicConfig(
         level=logging.INFO,
@@ -114,14 +118,15 @@ def _run(cmd, check=True, timeout=None):
         [str(c) for c in cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        universal_newlines=True,  # text=True equivalent, compatible with Python < 3.7
+        universal_newlines=True,
         timeout=timeout,
     )
     if check and result.returncode != 0:
         raise SyncError(
-            f"Command failed (rc={result.returncode}): "
-            f"{' '.join(str(c) for c in cmd)}\n"
-            f"stderr: {result.stderr.strip()}"
+            "Command failed (rc=%d): %s\nstderr: %s"
+            % (result.returncode,
+               " ".join(str(c) for c in cmd),
+               result.stderr.strip())
         )
     return result.stdout.strip(), result.stderr.strip(), result.returncode
 
@@ -135,9 +140,9 @@ def _xe_list(object_type, **filters):
     Return list of UUIDs from 'xe <type>-list --minimal' with optional filters.
     Python underscores in keyword args are converted to hyphens for xe CLI.
     """
-    cmd = [f"{object_type}-list", "--minimal"]
+    cmd = ["%s-list" % object_type, "--minimal"]
     for k, v in filters.items():
-        cmd.append(f"{k.replace('_', '-')}={v}")
+        cmd.append("%s=%s" % (k.replace("_", "-"), v))
     out, _, _ = _xe(*cmd, check=False)
     if not out.strip():
         return []
@@ -146,7 +151,7 @@ def _xe_list(object_type, **filters):
 
 def _xe_params(object_type, uuid):
     """Return dict of all params for an object."""
-    out, _, _ = _xe(f"{object_type}-param-list", f"uuid={uuid}")
+    out, _, _ = _xe("%s-param-list" % object_type, "uuid=%s" % uuid)
     return _parse_xe_param_list(out)
 
 
@@ -164,22 +169,22 @@ def _parse_xe_param_list(output):
 
 def _xe_get(object_type, uuid, param):
     """Get a single param value."""
-    out, _, _ = _xe(f"{object_type}-param-get", f"uuid={uuid}", f"param-name={param}")
+    out, _, _ = _xe("%s-param-get" % object_type, "uuid=%s" % uuid, "param-name=%s" % param)
     return out.strip()
 
 
 def _xe_set(object_type, uuid, param, value):
     """Set a single param value."""
-    _xe(f"{object_type}-param-set", f"uuid={uuid}", f"{param}={value}")
+    _xe("%s-param-set" % object_type, "uuid=%s" % uuid, "%s=%s" % (param, value))
 
 
 def _xe_other_config_get(object_type, uuid, key):
     """Safely read a single key from other-config map."""
     out, _, rc = _xe(
-        f"{object_type}-param-get",
-        f"uuid={uuid}",
+        "%s-param-get" % object_type,
+        "uuid=%s" % uuid,
         "param-name=other-config",
-        f"param-key={key}",
+        "param-key=%s" % key,
         check=False,
     )
     if rc != 0:
@@ -190,9 +195,9 @@ def _xe_other_config_get(object_type, uuid, key):
 def _xe_other_config_set(object_type, uuid, key, value):
     """Set a single key in other-config map."""
     _xe(
-        f"{object_type}-param-set",
-        f"uuid={uuid}",
-        f"other-config:{key}={value}",
+        "%s-param-set" % object_type,
+        "uuid=%s" % uuid,
+        "other-config:%s=%s" % (key, value),
     )
 
 # ---------------------------------------------------------------------------
@@ -208,9 +213,8 @@ def _acquire_lock():
         try:
             with open(LOCK_FILE) as f:
                 pid = int(f.read().strip())
-            # Check if process is still alive
             os.kill(pid, 0)
-            log.info("Lock held by PID %d — already running.", pid)
+            log.info("Lock held by PID %d -- already running.", pid)
             return False
         except (ValueError, ProcessLookupError, OSError):
             log.warning("Stale lock file found (PID gone), removing.")
@@ -256,7 +260,7 @@ def _is_locked():
 # Helpers: state file
 # ---------------------------------------------------------------------------
 
-def _write_state(state: dict):
+def _write_state(state):
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(state, f, indent=2)
@@ -264,7 +268,7 @@ def _write_state(state: dict):
         log.warning("Could not write state file: %s", e)
 
 
-def _read_state() -> dict:
+def _read_state():
     try:
         with open(STATE_FILE) as f:
             return json.load(f)
@@ -289,10 +293,6 @@ def _sha256_for_xva(xva_path):
     """
     Return SHA256 for an XVA, using a sidecar .sha256 file when available.
 
-    Reading a multi-GB XVA over SMB can take tens of seconds.  In the dry-run
-    path this runs synchronously inside the XAPI plugin process, which has a
-    hard timeout.  A sidecar file sidesteps that problem entirely.
-
     Sidecar format: a file named <xva>.sha256 sitting beside the XVA on the
     share, containing exactly the lowercase 64-char hex digest (optional
     trailing whitespace), matching:
@@ -311,7 +311,7 @@ def _sha256_for_xva(xva_path):
                 return digest
             log.warning("Sidecar %s has invalid content, falling back to full hash", sidecar)
         except OSError as e:
-            log.warning("Could not read sidecar %s: %s — falling back to full hash", sidecar, e)
+            log.warning("Could not read sidecar %s: %s -- falling back to full hash", sidecar, e)
     return _sha256(xva_path)
 
 
@@ -337,7 +337,7 @@ def _write_cred_file(user, password):
     fd, path = tempfile.mkstemp(prefix=CRED_FILE_BASE)
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(f"username={user}\npassword={password}\n")
+            f.write("username=%s\npassword=%s\n" % (user, password))
         os.chmod(path, 0o600)
     except Exception:
         os.unlink(path)
@@ -357,17 +357,16 @@ def _mount_smb(host, share, user, password, smb_ver, mount_point):
 
     cred_file = _write_cred_file(user, password)
     try:
-        unc = f"//{host}/{share}"
+        unc = "//%s/%s" % (host, share)
         cmd = [
             "mount", "-t", "cifs", unc, mount_point,
-            "-o", f"credentials={cred_file},ro,vers={smb_ver}",
+            "-o", "credentials=%s,ro,vers=%s" % (cred_file, smb_ver),
         ]
         _, stderr, rc = _run(cmd, check=False)
         if rc != 0:
-            raise FatalError(f"SMB mount failed (rc={rc}): {stderr}")
+            raise FatalError("SMB mount failed (rc=%d): %s" % (rc, stderr))
         log.info("Mounted %s at %s", unc, mount_point)
     finally:
-        # Always delete credentials file
         try:
             os.unlink(cred_file)
         except Exception:
@@ -375,7 +374,7 @@ def _mount_smb(host, share, user, password, smb_ver, mount_point):
 
 
 def _unmount_smb(mount_point):
-    """Unmount SMB share. Best-effort — logs but does not raise."""
+    """Unmount SMB share. Best-effort -- logs but does not raise."""
     try:
         _run(["umount", "-l", mount_point], check=False)
         log.info("Unmounted %s", mount_point)
@@ -395,14 +394,17 @@ def _get_managed_templates(sr_uuid=None):
     Return dict of { source_filename: { uuid, sha256, size, mtime, name_label, source_file } }
     for all templates tagged with META_MANAGED=true.
 
+    Uses 'xe template-list' because templates are hidden from 'xe vm-list'
+    even with is-a-template=true on XCP-ng.
+
     If sr_uuid is provided, only templates whose VDIs reside on that SR are
     returned.  Without this filter, a host with two managed SRs could see
     templates from SR-A in SR-B's diff and wrongly target them for deletion.
     """
-    vm_uuids = _xe_list("vm", is_a_template="true")
+    vm_uuids = _xe_list("template")
     managed = {}
     for uuid in vm_uuids:
-        if _xe_other_config_get("vm", uuid, META_MANAGED) != "true":
+        if _xe_other_config_get("template", uuid, META_MANAGED) != "true":
             continue
 
         if sr_uuid:
@@ -416,14 +418,14 @@ def _get_managed_templates(sr_uuid=None):
                     on_target_sr = True
                     break
             if not on_target_sr:
-                log.debug("Template %s skipped — not on SR %s", uuid, sr_uuid)
+                log.debug("Template %s skipped -- not on SR %s", uuid, sr_uuid)
                 continue
 
-        source     = _xe_other_config_get("vm", uuid, META_SOURCE) or ""
-        sha256     = _xe_other_config_get("vm", uuid, META_SHA256) or ""
-        size       = _xe_other_config_get("vm", uuid, META_SIZE) or ""
-        mtime      = _xe_other_config_get("vm", uuid, META_MTIME) or ""
-        name_label = _xe_get("vm", uuid, "name-label")
+        source     = _xe_other_config_get("template", uuid, META_SOURCE) or ""
+        sha256     = _xe_other_config_get("template", uuid, META_SHA256) or ""
+        size       = _xe_other_config_get("template", uuid, META_SIZE) or ""
+        mtime      = _xe_other_config_get("template", uuid, META_MTIME) or ""
+        name_label = _xe_get("template", uuid, "name-label")
         managed[source] = {
             "uuid": uuid,
             "sha256": sha256,
@@ -441,12 +443,12 @@ def _has_children(template_uuid):
     belonging to this template.
 
     The authoritative safety check is at the VDI level via VDI.snapshot_of:
-    - xe vm-clone     → child VDIs have snapshot_of pointing to template VDIs
-    - xe vm-snapshot  → same mechanism
+    - xe vm-clone     -> child VDIs have snapshot_of pointing to template VDIs
+    - xe vm-snapshot  -> same mechanism
 
     IMPORTANT: xe vm-list snapshot-of=<template_uuid> only finds VMs whose
     *VM record* has VM.snapshot_of set.  Cloned VMs do NOT set this field back
-    to the template — only their VDIs carry the reference.  Checking VM records
+    to the template -- only their VDIs carry the reference.  Checking VM records
     would silently miss active clones and is therefore omitted.  The VDI-level
     check below is sufficient and correct for both clone and snapshot cases.
     """
@@ -474,17 +476,15 @@ def _replace_vifs(template_uuid, network_uuid):
     on network_uuid at device index 0.
     Returns the new VIF uuid.
     """
-    # Remove all existing VIFs
     existing_vifs = _xe_list("vif", vm_uuid=template_uuid)
     for vif_uuid in existing_vifs:
-        _xe("vif-destroy", f"uuid={vif_uuid}")
+        _xe("vif-destroy", "uuid=%s" % vif_uuid)
         log.info("Destroyed existing VIF %s on template %s", vif_uuid, template_uuid)
 
-    # Create new VIF
     out, _, _ = _xe(
         "vif-create",
-        f"vm-uuid={template_uuid}",
-        f"network-uuid={network_uuid}",
+        "vm-uuid=%s" % template_uuid,
+        "network-uuid=%s" % network_uuid,
         "device=0",
     )
     vif_uuid = out.strip()
@@ -499,30 +499,29 @@ def _import_xva(xva_path, sr_uuid):
     """
     Import an XVA file into the given SR.
     Returns the new VM uuid.
-    XVA import is atomic per-file — killed mid-import leaves no partial template.
+    XVA import is atomic per-file -- killed mid-import leaves no partial template.
     """
     log.info("Importing %s into SR %s ...", xva_path, sr_uuid)
     out, _, _ = _xe(
         "vm-import",
-        f"filename={xva_path}",
-        f"sr-uuid={sr_uuid}",
-        "preserve=false",       # Don't preserve UUIDs — avoid conflicts across hosts
-        timeout=600,             # 10 min per XVA; adjust if needed
+        "filename=%s" % xva_path,
+        "sr-uuid=%s" % sr_uuid,
+        "preserve=false",
+        timeout=1800,            # 30 min per XVA; covers large files over slow links
     )
-    # xe vm-import returns one or more UUIDs (comma-separated if multiple VMs)
     uuids = [u.strip() for u in out.split(",") if u.strip()]
     if not uuids:
-        raise SyncError(f"vm-import returned no UUID for {xva_path}")
+        raise SyncError("vm-import returned no UUID for %s" % xva_path)
     if len(uuids) > 1:
-        log.warning("XVA %s produced multiple VMs: %s — using first", xva_path, uuids)
+        log.warning("XVA %s produced multiple VMs: %s -- using first", xva_path, uuids)
     return uuids[0]
 
 
 def _set_as_template(vm_uuid, name_label=None):
     """Force a VM to be a template."""
-    _xe("vm-param-set", f"uuid={vm_uuid}", "is-a-template=true")
+    _xe("vm-param-set", "uuid=%s" % vm_uuid, "is-a-template=true")
     if name_label:
-        _xe("vm-param-set", f"uuid={vm_uuid}", f"name-label={name_label}")
+        _xe("vm-param-set", "uuid=%s" % vm_uuid, "name-label=%s" % name_label)
 
 
 def _tag_template(vm_uuid, source_file, sha256, size="", mtime=""):
@@ -540,11 +539,10 @@ def _delete_template(vm_uuid):
     Caller must have already verified no children exist.
 
     xe vm-uninstall force=true destroys the VM record and all attached VDIs
-    in one atomic operation.  A prior per-VDI vdi-destroy loop is redundant
-    and has been removed.
+    in one atomic operation.
     """
     log.info("Deleting template %s ...", vm_uuid)
-    _xe("vm-uninstall", f"uuid={vm_uuid}", "force=true")
+    _xe("vm-uninstall", "uuid=%s" % vm_uuid, "force=true")
     log.info("Deleted template %s", vm_uuid)
 
 # ---------------------------------------------------------------------------
@@ -571,17 +569,16 @@ def _file_changed(xva_path, tpl):
             return False, tpl["sha256"], current_size, current_mtime
         else:
             log.info(
-                "File %s changed: size %s→%s, mtime %s→%s",
+                "File %s changed: size %s->%s, mtime %s->%s",
                 os.path.basename(xva_path),
                 tpl["size"], current_size,
                 tpl["mtime"], current_mtime,
             )
-            # Compute SHA256 for the new version (use sidecar if available)
             sha256 = _sha256_for_xva(xva_path)
             return True, sha256, current_size, current_mtime
 
-    # Slow path: no size/mtime metadata — fall back to SHA256
-    log.info("No size/mtime metadata for %s — falling back to SHA256", os.path.basename(xva_path))
+    # Slow path: no size/mtime metadata -- fall back to SHA256
+    log.info("No size/mtime metadata for %s -- falling back to SHA256", os.path.basename(xva_path))
     sha256 = _sha256_for_xva(xva_path)
     changed = sha256 != tpl["sha256"]
     return changed, sha256, current_size, current_mtime
@@ -615,17 +612,17 @@ def _compute_diff(mount_point, managed_templates):
             if f.lower().endswith(".xva") and os.path.isfile(os.path.join(mount_point, f))
         }
     except OSError as e:
-        raise FatalError(f"Cannot list mount point {mount_point}: {e}")
+        raise FatalError("Cannot list mount point %s: %s" % (mount_point, e))
 
     log.info("Found %d XVA(s) on share: %s", len(xva_files), sorted(xva_files))
 
     share_files = set(xva_files)
     managed_files = set(managed_templates.keys())
 
-    # Files on share only → import
+    # Files on share only -> import
     for fname in sorted(share_files - managed_files):
         xva_path = os.path.join(mount_point, fname)
-        log.info("New file %s — computing identity ...", fname)
+        log.info("New file %s -- computing identity ...", fname)
         size, mtime = _file_identity(xva_path)
         sha256 = _sha256_for_xva(xva_path)
         diff["to_import"].append({
@@ -636,7 +633,7 @@ def _compute_diff(mount_point, managed_templates):
             "mtime": mtime,
         })
 
-    # Files on share AND managed locally → check for changes
+    # Files on share AND managed locally -> check for changes
     for fname in sorted(share_files & managed_files):
         tpl = managed_templates[fname]
         xva_path = os.path.join(mount_point, fname)
@@ -651,12 +648,12 @@ def _compute_diff(mount_point, managed_templates):
                 "reason": "unchanged",
             })
         else:
-            # Changed — check for children
             has_children = _has_children(tpl["uuid"])
             if has_children:
                 msg = (
-                    f"Template {tpl['uuid']} ({fname}) has changed on share "
-                    f"but has local children — keeping old version."
+                    "Template %s (%s) has changed on share "
+                    "but has local children -- keeping old version."
+                    % (tpl["uuid"], fname)
                 )
                 log.warning(msg)
                 diff["warnings"].append({
@@ -683,14 +680,15 @@ def _compute_diff(mount_point, managed_templates):
                     "has_children": False,
                 })
 
-    # Managed locally but NOT on share → delete (if no children)
+    # Managed locally but NOT on share -> delete (if no children)
     for fname in sorted(managed_files - share_files):
         tpl = managed_templates[fname]
         has_children = _has_children(tpl["uuid"])
         if has_children:
             msg = (
-                f"Template {tpl['uuid']} ({fname}) was removed from share "
-                f"but has local children — skipping deletion."
+                "Template %s (%s) was removed from share "
+                "but has local children -- skipping deletion."
+                % (tpl["uuid"], fname)
             )
             log.warning(msg)
             diff["warnings"].append({
@@ -713,7 +711,7 @@ def _execute_diff(diff, sr_uuid, network_uuid, state):
     """
     Execute the diff: import, replace, delete.
     Updates state dict in-place as work progresses.
-    Never raises — errors are captured per-item.
+    Never raises -- errors are captured per-item.
     """
 
     # --- DELETIONS ---
@@ -726,11 +724,11 @@ def _execute_diff(diff, sr_uuid, network_uuid, state):
                 "source_file": item["source_file"],
             })
         except Exception as e:
-            err = f"Failed to delete {item['uuid']} ({item['source_file']}): {e}"
+            err = "Failed to delete %s (%s): %s" % (item["uuid"], item["source_file"], e)
             log.error(err)
             state["errors"].append({"source_file": item["source_file"], "message": err})
 
-    # --- REPLACEMENTS (delete old → import new) ---
+    # --- REPLACEMENTS (delete old -> import new) ---
     for item in diff["to_replace"]:
         try:
             log.info("Replacing template %s (%s)", item["uuid"], item["source_file"])
@@ -752,7 +750,7 @@ def _execute_diff(diff, sr_uuid, network_uuid, state):
                 entry["vif_uuid"] = vif_uuid
             state["imported"].append(entry)
         except Exception as e:
-            err = f"Failed to replace {item['source_file']}: {e}\n{traceback.format_exc()}"
+            err = "Failed to replace %s: %s\n%s" % (item["source_file"], e, traceback.format_exc())
             log.error(err)
             state["errors"].append({"source_file": item["source_file"], "message": str(e)})
 
@@ -773,9 +771,9 @@ def _execute_diff(diff, sr_uuid, network_uuid, state):
             if vif_uuid:
                 entry["vif_uuid"] = vif_uuid
             state["imported"].append(entry)
-            log.info("Imported %s → %s", item["source_file"], new_uuid)
+            log.info("Imported %s -> %s", item["source_file"], new_uuid)
         except Exception as e:
-            err = f"Failed to import {item['source_file']}: {e}\n{traceback.format_exc()}"
+            err = "Failed to import %s: %s\n%s" % (item["source_file"], e, traceback.format_exc())
             log.error(err)
             state["errors"].append({"source_file": item["source_file"], "message": str(e)})
 
@@ -804,7 +802,7 @@ def _sync_worker(smb_host, smb_share, smb_user, smb_password,
     }
     _write_state(state)
 
-    mount_point = f"{MOUNT_BASE}_{os.getpid()}"
+    mount_point = "%s_%d" % (MOUNT_BASE, os.getpid())
 
     try:
         # 1. Mount
@@ -865,7 +863,7 @@ def _do_dry_run(smb_host, smb_share, smb_user, smb_password, smb_ver, sr_uuid, s
     Mount share, compute diff, unmount. Returns dry-run payload dict.
     Does NOT acquire the lock and does NOT modify any state.
     """
-    mount_point = f"{MOUNT_BASE}_dryrun_{os.getpid()}"
+    mount_point = "%s_dryrun_%d" % (MOUNT_BASE, os.getpid())
     result = {
         "dry_run": True,
         "sync_running": _is_locked(),
@@ -905,7 +903,6 @@ def _do_dry_run(smb_host, smb_share, smb_user, smb_password, smb_ver, sr_uuid, s
         ]
         result["pending"]["warnings"] = diff["warnings"]
 
-        # Converged = nothing left to do and no errors in last run
         last_errors = result["last_run"].get("errors", [])
         nothing_pending = (
             not diff["to_import"]
@@ -936,11 +933,10 @@ def sync_templates(session, args):
     """
     _setup_logging()
 
-    # Parse args
     def _req(key):
         val = args.get(key, "").strip()
         if not val:
-            raise XenAPIPlugin.Failure("MISSING_ARG", [f"Missing required argument: {key}"])
+            raise XenAPIPlugin.Failure("MISSING_ARG", ["Missing required argument: %s" % key])
         return val
 
     smb_host    = _req("smb_host")
@@ -961,10 +957,9 @@ def sync_templates(session, args):
 
     # --- FIRE AND FORGET ---
     if not _acquire_lock():
-        log.info("Sync already running — returning immediately.")
+        log.info("Sync already running -- returning immediately.")
         return json.dumps({"status": "already_running"})
 
-    # Double-fork to fully detach child from XAPI's process group
     try:
         pid = os.fork()
     except OSError as e:
@@ -972,30 +967,22 @@ def sync_templates(session, args):
         raise XenAPIPlugin.Failure("FORK_ERROR", [str(e)])
 
     if pid > 0:
-        # Parent: return immediately to XAPI
-        log.info("Forked sync worker PID %d — returning to caller.", pid)
+        log.info("Forked sync worker PID %d -- returning to caller.", pid)
         return json.dumps({"status": "started", "worker_pid": pid})
 
     # Child process: detach and run
     try:
-        os.setsid()  # new session, detach from terminal
+        os.setsid()
 
-        # Second fork to prevent zombie
         try:
             pid2 = os.fork()
             if pid2 > 0:
-                os._exit(0)  # first child exits, grandchild continues
+                os._exit(0)
         except OSError:
             pass
 
-        # Grandchild: do the actual work.
-        # CRITICAL: rewrite lock file with grandchild's own PID immediately.
-        # The parent wrote its PID before forking and has since exited.
-        # Without this, _is_locked() finds a dead PID, declares the lock
-        # stale, and allows a concurrent sync to start.
         _rewrite_lock_with_current_pid()
 
-        # Redirect stdio to avoid blocking on closed XAPI pipes
         with open("/dev/null", "r") as devnull:
             os.dup2(devnull.fileno(), sys.stdin.fileno())
         with open(LOG_FILE, "a") as logf:
@@ -1007,7 +994,6 @@ def sync_templates(session, args):
             smb_ver, sr_uuid, network_uuid, smb_subdir,
         )
     except Exception as e:
-        # Last resort — make sure lock is released
         try:
             log.error("Worker crash: %s\n%s", e, traceback.format_exc())
             _release_lock()
