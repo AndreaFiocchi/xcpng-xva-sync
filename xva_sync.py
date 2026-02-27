@@ -447,10 +447,19 @@ def _import_xva(xva_path, sr_uuid):
     return uuids[0]
 
 
-def _set_as_template(vm_uuid, name_label=None):
+def _set_as_template(vm_uuid):
     _xe("vm-param-set", "uuid=%s" % vm_uuid, "is-a-template=true")
-    if name_label:
-        _xe("vm-param-set", "uuid=%s" % vm_uuid, "name-label=%s" % name_label)
+
+
+def _rename_template_and_vdis(vm_uuid, name_label):
+    """Set name-label on the template record and all its attached VDIs."""
+    _xe("vm-param-set", "uuid=%s" % vm_uuid, "name-label=%s" % name_label)
+    vbd_uuids = _xe_list("vbd", vm_uuid=vm_uuid)
+    for vbd_uuid in vbd_uuids:
+        vdi_uuid = _xe_get("vbd", vbd_uuid, "vdi-uuid")
+        if vdi_uuid and vdi_uuid != "<not in database>":
+            _xe("vdi-param-set", "uuid=%s" % vdi_uuid, "name-label=%s" % name_label)
+            log.info("Renamed VDI %s to '%s'", vdi_uuid, name_label)
 
 
 def _tag_template(vm_uuid, source_file, sha256, size="", mtime=""):
@@ -462,22 +471,38 @@ def _tag_template(vm_uuid, source_file, sha256, size="", mtime=""):
 
 
 def _delete_template(vm_uuid):
-    log.info("Deleting template %s ...", vm_uuid)
-    _xe("vm-uninstall", "uuid=%s" % vm_uuid, "force=true")
+    log.info("Deleting template %s and its disks ...", vm_uuid)
+    # Destroy each VDI attached to the template
+    vbd_uuids = _xe_list("vbd", vm_uuid=vm_uuid)
+    for vbd_uuid in vbd_uuids:
+        vdi_uuid = _xe_get("vbd", vbd_uuid, "vdi-uuid")
+        if vdi_uuid and vdi_uuid != "<not in database>":
+            _xe("vdi-destroy", "uuid=%s" % vdi_uuid)
+            log.info("Destroyed VDI %s for template %s", vdi_uuid, vm_uuid)
+    # Destroy the template record
+    _xe("vm-destroy", "uuid=%s" % vm_uuid)
     log.info("Deleted template %s", vm_uuid)
 
 
 def _rollback_vm(vm_uuid, context=""):
     """
-    Best-effort destroy of a VM/template that was partially created.
+    Best-effort destroy of a partially-imported template and its disks.
     Used to clean up after failed imports where vm-import succeeded
     but subsequent steps (tagging, VIF) failed.
     """
     try:
-        _xe("vm-uninstall", "uuid=%s" % vm_uuid, "force=true", check=False)
-        log.info("Rolled back orphaned VM %s (%s)", vm_uuid, context)
+        vbd_uuids = _xe_list("vbd", vm_uuid=vm_uuid)
+        for vbd_uuid in vbd_uuids:
+            try:
+                vdi_uuid = _xe_get("vbd", vbd_uuid, "vdi-uuid")
+                if vdi_uuid and vdi_uuid != "<not in database>":
+                    _xe("vdi-destroy", "uuid=%s" % vdi_uuid, check=False)
+            except Exception:
+                pass
+        _xe("vm-destroy", "uuid=%s" % vm_uuid, check=False)
+        log.info("Rolled back orphaned template %s (%s)", vm_uuid, context)
     except Exception as e:
-        log.warning("Failed to roll back VM %s: %s", vm_uuid, e)
+        log.warning("Failed to roll back template %s: %s", vm_uuid, e)
 
 # ---------------------------------------------------------------------------
 # Cleanup: orphaned templates and VDIs
@@ -777,6 +802,7 @@ def _execute_diff(diff, sr_uuid, network_uuid, state):
             _delete_template(item["uuid"])
             new_uuid = _import_xva(item["xva_path"], sr_uuid)
             _set_as_template(new_uuid)
+            _rename_template_and_vdis(new_uuid, os.path.splitext(item["source_file"])[0])
             _tag_template(new_uuid, item["source_file"], item["sha256"],
                           item.get("size", ""), item.get("mtime", ""))
             vif_uuid = None
@@ -804,6 +830,7 @@ def _execute_diff(diff, sr_uuid, network_uuid, state):
         try:
             new_uuid = _import_xva(item["xva_path"], sr_uuid)
             _set_as_template(new_uuid)
+            _rename_template_and_vdis(new_uuid, os.path.splitext(item["source_file"])[0])
             _tag_template(new_uuid, item["source_file"], item["sha256"],
                           item.get("size", ""), item.get("mtime", ""))
             vif_uuid = None
